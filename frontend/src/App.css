@@ -83,6 +83,12 @@
   font-size: 0.95rem;
 }
 
+.location-helper-text {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
 .upload-section button {
   justify-self: start;
   padding: 11px 20px;

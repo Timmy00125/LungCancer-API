@@ -1,7 +1,27 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import './App.css'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+
+const PREPOPULATED_CITY_ZIPS = {
+  Austin: ['73301', '78701', '78704', '78705'],
+  Dallas: ['75201', '75204', '75208', '75219'],
+  Houston: ['77001', '77002', '77019', '77056'],
+  SanAntonio: ['78201', '78205', '78209', '78230'],
+  Chicago: ['60601', '60605', '60611', '60614'],
+  Phoenix: ['85001', '85004', '85012', '85016'],
+  Philadelphia: ['19103', '19104', '19107', '19147'],
+  SanDiego: ['92101', '92103', '92109', '92122'],
+  LosAngeles: ['90001', '90012', '90017', '90049'],
+  SanJose: ['95110', '95112', '95123', '95126'],
+  NewYork: ['10001', '10003', '10019', '10025'],
+  Boston: ['02108', '02110', '02116', '02118'],
+  Seattle: ['98101', '98103', '98105', '98109'],
+  Denver: ['80202', '80203', '80205', '80206'],
+  Miami: ['33101', '33130', '33131', '33139'],
+}
+
+const formatCityLabel = (cityKey) => cityKey.replace(/([a-z])([A-Z])/g, '$1 $2')
 
 function App() {
   const [selectedFile, setSelectedFile] = useState(null)
@@ -13,6 +33,70 @@ function App() {
   const [communityRisk, setCommunityRisk] = useState([])
   const [loading, setLoading] = useState(false)
   const [dashboardLoading, setDashboardLoading] = useState(false)
+
+  const normalizeLocationPart = (value) => value.trim()
+
+  const { cityOptions, zipOptionsForSelectedCity, zipToCities, cityToZips, allZipOptions } = useMemo(() => {
+    const cities = new Set()
+    const cityToZipsMap = new Map()
+    const zipToCitiesMap = new Map()
+
+    Object.entries(PREPOPULATED_CITY_ZIPS).forEach(([cityKey, zipCodes]) => {
+      const cleanCity = formatCityLabel(cityKey)
+      cities.add(cleanCity)
+
+      if (!cityToZipsMap.has(cleanCity)) {
+        cityToZipsMap.set(cleanCity, new Set())
+      }
+
+      zipCodes.forEach((zipCodeValue) => {
+        const cleanZip = normalizeLocationPart(zipCodeValue)
+        cityToZipsMap.get(cleanCity).add(cleanZip)
+
+        if (!zipToCitiesMap.has(cleanZip)) {
+          zipToCitiesMap.set(cleanZip, new Set())
+        }
+        zipToCitiesMap.get(cleanZip).add(cleanCity)
+      })
+    })
+
+    history.forEach((record) => {
+      const cleanCity = normalizeLocationPart(record.city || '')
+      const cleanZip = normalizeLocationPart(record.zip_code || '')
+
+      if (cleanCity) {
+        cities.add(cleanCity)
+      }
+
+      if (cleanCity && cleanZip) {
+        if (!cityToZipsMap.has(cleanCity)) {
+          cityToZipsMap.set(cleanCity, new Set())
+        }
+        cityToZipsMap.get(cleanCity).add(cleanZip)
+
+        if (!zipToCitiesMap.has(cleanZip)) {
+          zipToCitiesMap.set(cleanZip, new Set())
+        }
+        zipToCitiesMap.get(cleanZip).add(cleanCity)
+      }
+    })
+
+    const allZips = [...zipToCitiesMap.keys()].sort((a, b) => a.localeCompare(b))
+    const sortedCities = [...cities].sort((a, b) => a.localeCompare(b))
+    const selectedCity = normalizeLocationPart(city)
+    const cityZipSet = cityToZipsMap.get(selectedCity) || new Set()
+    const sortedZipForSelectedCity = selectedCity
+      ? [...cityZipSet].sort((a, b) => a.localeCompare(b))
+      : allZips
+
+    return {
+      cityOptions: sortedCities,
+      zipOptionsForSelectedCity: sortedZipForSelectedCity,
+      zipToCities: zipToCitiesMap,
+      cityToZips: cityToZipsMap,
+      allZipOptions: allZips,
+    }
+  }, [history, city])
 
   const fetchHistory = async () => {
     try {
@@ -124,17 +208,69 @@ function App() {
           <div className="location-fields">
             <input
               type="text"
-              placeholder="City (e.g., Austin)"
+              placeholder="Search city (e.g., Austin)"
               value={city}
-              onChange={(e) => setCity(e.target.value)}
+              list="city-options"
+              onChange={(e) => {
+                const nextCity = e.target.value
+                setCity(nextCity)
+
+                const normalizedNextCity = normalizeLocationPart(nextCity)
+                if (!normalizedNextCity || !zipCode) {
+                  return
+                }
+
+                const zipAllowedForCity = (cityToZips.get(normalizedNextCity) || new Set()).has(
+                  zipCode.trim()
+                )
+                if (!zipAllowedForCity) {
+                  setZipCode('')
+                }
+              }}
             />
+            <datalist id="city-options">
+              {cityOptions.map((cityOption) => (
+                <option key={cityOption} value={cityOption} />
+              ))}
+            </datalist>
             <input
               type="text"
-              placeholder="Zip code (e.g., 73301)"
+              placeholder={city.trim() ? 'Search ZIP for selected city' : 'Search ZIP (e.g., 73301)'}
               value={zipCode}
-              onChange={(e) => setZipCode(e.target.value)}
+              list="zip-options"
+              onChange={(e) => {
+                const nextZip = e.target.value
+                setZipCode(nextZip)
+
+                const normalizedZip = normalizeLocationPart(nextZip)
+                if (!normalizedZip || city.trim()) {
+                  return
+                }
+
+                const linkedCities = zipToCities.get(normalizedZip)
+                if (linkedCities && linkedCities.size === 1) {
+                  setCity([...linkedCities][0])
+                }
+              }}
             />
+            <datalist id="zip-options">
+              {zipOptionsForSelectedCity.map((zipOption) => (
+                <option key={zipOption} value={zipOption} />
+              ))}
+            </datalist>
           </div>
+          {city.trim() && (
+            <p className="location-helper-text">
+              {zipOptionsForSelectedCity.length > 0
+                ? `${zipOptionsForSelectedCity.length} ZIP code(s) found for ${city.trim()}.`
+                : `No ZIP code history found yet for ${city.trim()}.`}
+            </p>
+          )}
+          {!city.trim() && allZipOptions.length > 0 && (
+            <p className="location-helper-text">
+              {allZipOptions.length} ZIP code(s) available. Select a city to narrow the list.
+            </p>
+          )}
           <button onClick={handleUpload} disabled={!selectedFile || loading}>
             {loading ? "Analyzing..." : "Analyze Image"}
           </button>
