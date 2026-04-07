@@ -9,7 +9,7 @@ function App() {
 
   const fetchHistory = async () => {
     try {
-      const res = await fetch("http://localhost:8004/predictions")
+      const res = await fetch("http://localhost:8000/predictions")
       const data = await res.json()
       setHistory(data)
     } catch (err) {
@@ -34,7 +34,7 @@ function App() {
     formData.append("file", selectedFile)
 
     try {
-      const res = await fetch("http://localhost:8004/predict", {
+      const res = await fetch("http://localhost:8000/predict", {
         method: "POST",
         body: formData
       })

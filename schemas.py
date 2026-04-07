@@ -1,11 +1,13 @@
 import datetime
 from pydantic import BaseModel
 
+
 class PredictionCreate(BaseModel):
     filename: str
     prediction: str
     detailed_class: str
     confidence: float
+
 
 class Prediction(BaseModel):
     id: int
@@ -16,4 +18,4 @@ class Prediction(BaseModel):
     created_at: datetime.datetime
 
     class Config:
-        orm_mode = True
+        from_attributes = True
