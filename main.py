@@ -1,6 +1,7 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Form
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
+from sqlalchemy import case, func, inspect, text
 import uvicorn
 import os
 from typing import Any
@@ -76,8 +77,47 @@ class CustomScaleLayer(Layer):
         return config
 
 
+def ensure_prediction_location_columns() -> None:
+    """Add nullable location columns for existing SQLite databases."""
+    inspector = inspect(engine)
+    table_names = inspector.get_table_names()
+    if "predictions" not in table_names:
+        return
+
+    existing_columns = {
+        column["name"] for column in inspector.get_columns("predictions")
+    }
+    missing_columns: list[tuple[str, str]] = []
+    if "city" not in existing_columns:
+        missing_columns.append(("city", "VARCHAR"))
+    if "zip_code" not in existing_columns:
+        missing_columns.append(("zip_code", "VARCHAR"))
+
+    if not missing_columns:
+        return
+
+    with engine.begin() as connection:
+        for column_name, column_type in missing_columns:
+            connection.execute(
+                text(f"ALTER TABLE predictions ADD COLUMN {column_name} {column_type}")
+            )
+
+
+def normalize_location_value(raw_value: str | None) -> str | None:
+    """Normalize optional location fields by trimming whitespace."""
+    if raw_value is None:
+        return None
+
+    cleaned_value = raw_value.strip()
+    if cleaned_value == "":
+        return None
+    return cleaned_value
+
+
 @app.on_event("startup")
-def load_ml_model():
+def load_ml_model() -> None:
+    ensure_prediction_location_columns()
+
     global model
     if os.path.exists(MODEL_PATH):
         model = load_model(
@@ -102,9 +142,22 @@ def preprocess_image(img_bytes):
 
 
 @app.post("/predict", response_model=schemas.Prediction)
-async def predict(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def predict(
+    file: UploadFile = File(...),
+    city: str | None = Form(default=None),
+    zip_code: str | None = Form(default=None),
+    db: Session = Depends(get_db),
+):
     if model is None:
         raise HTTPException(status_code=500, detail="Model is not loaded.")
+
+    city_value = normalize_location_value(city)
+    zip_code_value = normalize_location_value(zip_code)
+    if city_value is None and zip_code_value is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Provide at least one location field: city or zip_code.",
+        )
 
     try:
         contents = await file.read()
@@ -127,6 +180,8 @@ async def predict(file: UploadFile = File(...), db: Session = Depends(get_db)):
             prediction=status,
             detailed_class=predicted_label,
             confidence=confidence,
+            city=city_value,
+            zip_code=zip_code_value,
         )
         db.add(db_prediction)
         db.commit()
@@ -148,6 +203,62 @@ def read_predictions(skip: int = 0, limit: int = 100, db: Session = Depends(get_
         .all()
     )
     return predictions
+
+
+@app.get(
+    "/predictions/community-risk", response_model=list[schemas.CommunityRiskSummary]
+)
+def read_community_risk(
+    min_samples: int = 1,
+    db: Session = Depends(get_db),
+):
+    """Return anonymized risk metrics grouped by location only."""
+    clean_zip_code = func.nullif(models.PredictionRecord.zip_code, "")
+    clean_city = func.nullif(models.PredictionRecord.city, "")
+    location_value = func.coalesce(clean_zip_code, clean_city)
+    location_type = case(
+        (clean_zip_code.is_not(None), "zip_code"),
+        else_="city",
+    )
+    cancerous_case = case(
+        (models.PredictionRecord.prediction == "cancerous", 1),
+        else_=0,
+    )
+
+    rows = (
+        db.query(
+            location_value.label("location"),
+            location_type.label("location_type"),
+            func.count(models.PredictionRecord.id).label("total_predictions"),
+            func.sum(cancerous_case).label("cancerous_cases"),
+            (func.count(models.PredictionRecord.id) - func.sum(cancerous_case)).label(
+                "non_cancerous_cases"
+            ),
+            func.avg(cancerous_case).label("cancerous_rate"),
+            func.avg(models.PredictionRecord.confidence).label("average_confidence"),
+        )
+        .filter(location_value.is_not(None))
+        .group_by(location_value, location_type)
+        .having(func.count(models.PredictionRecord.id) >= min_samples)
+        .order_by(
+            func.avg(cancerous_case).desc(),
+            func.count(models.PredictionRecord.id).desc(),
+        )
+        .all()
+    )
+
+    return [
+        schemas.CommunityRiskSummary(
+            location=str(row.location),
+            location_type=str(row.location_type),
+            total_predictions=int(row.total_predictions),
+            cancerous_cases=int(row.cancerous_cases or 0),
+            non_cancerous_cases=int(row.non_cancerous_cases or 0),
+            cancerous_rate=float(row.cancerous_rate or 0.0),
+            average_confidence=float(row.average_confidence or 0.0),
+        )
+        for row in rows
+    ]
 
 
 if __name__ == "__main__":
